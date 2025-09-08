@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - '**/*.java'
+
 jobs:
   ai-review:
     runs-on: ubuntu-22.04
