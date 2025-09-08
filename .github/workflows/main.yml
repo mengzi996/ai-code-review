@@ -1,0 +1,137 @@
+name: "🤖 AI Code Review"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.java'
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-22.04
+    container:
+      image: ollama/ollama:latest
+
+    steps:
+      - name: 📦 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ⬇️ Pull AI Model
+        run: |
+          ollama pull deepseek-coder:33b
+
+      - name: 🔍 Find Changed Java Files
+        id: java_files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_REF="${{ github.base_ref }}"
+          if [ -n "$BASE_REF" ]; then
+            git fetch --quiet origin "$BASE_REF" || true
+            JAVA_FILES=$(git diff --name-only "origin/$BASE_REF" HEAD | grep '\.java$' || true)
+          else
+            JAVA_FILES=$(git diff --name-only HEAD^ HEAD | grep '\.java$' || true)
+          fi
+
+          {
+            echo "JAVA_FILES<<EOF"
+            echo "$JAVA_FILES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: 🧠 Run AI Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AI_PROMPT: |
+            请严格分析以下Java代码，重点关注：
+            1. 线程安全（如 SimpleDateFormat 使用）
+            2. 异常处理（避免 throws Exception）
+            3. 日志记录（是否使用 SLF4J）
+            4. 空值检查
+            5. 性能问题
+
+            请以标准JSON格式返回，不要有任何额外说明：
+            {
+              "file": "placeholder",
+              "issues": [
+                {
+                  "line": 1,
+                  "severity": "error",
+                  "message": "问题描述",
+                  "suggestion": "改进建议"
+                }
+              ],
+              "score": 85
+            }
+
+            代码如下：
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 安装 jq（容器内可能没有）
+          if ! command -v jq >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y jq
+          fi
+
+          FILES="${{ steps.java_files.outputs.JAVA_FILES }}"
+          if [ -z "$FILES" ]; then
+            echo "No Java files changed. Skipping AI review."
+            exit 0
+          fi
+
+          IFS=$'\n'
+          HAS_ERROR=0
+
+          for file in $FILES; do
+            echo "🔍 正在评审: $file"
+
+            # 把 prompt 写入临时文件（避免 heredoc 缩进问题）
+            printf '%s\n' "$AI_PROMPT" > /tmp/ai-prompt.txt
+            # 追加文件代码
+            cat "$file" >> /tmp/ai-prompt.txt
+
+            # 调用 AI 分析（失败时保留输出用于诊断）
+            OUTPUT=$(ollama run deepseek-coder:33b < /tmp/ai-prompt.txt || true)
+
+            # 从输出中尝试提取第一个 JSON 对象（保守做法）
+            OUTPUT_JSON=$(echo "$OUTPUT" | tr '\n' ' ' | sed -n 's/.*\({.*}\).*/\1/p' || true)
+
+            SAFE_NAME=$(echo "$file" | sed 's|/|_|g')
+            RESULT_FILE="ai-review-result-${SAFE_NAME}.json"
+
+            if [ -z "$OUTPUT_JSON" ]; then
+              echo "⚠️ AI 输出不是有效 JSON（或被多余文字污染）: $file"
+              echo "$OUTPUT" > "ai-review-raw-${SAFE_NAME}.txt"
+              HAS_ERROR=1
+            else
+              echo "$OUTPUT_JSON" | jq --arg filepath "$file" '.file = $filepath' > "$RESULT_FILE"
+              if jq -e '.issues[] | select(.severity == "error")' "$RESULT_FILE" >/dev/null 2>&1; then
+                HAS_ERROR=1
+              fi
+            fi
+
+            rm -f /tmp/ai-prompt.txt
+          done
+
+          if [ "$HAS_ERROR" -eq 1 ]; then
+            echo "❌ AI 发现严重问题或输出异常，阻断构建"
+            ls -1 ai-review-*.json ai-review-raw-*.txt || true
+            exit 1
+          fi
+
+          echo "✅ 所有 Java 文件通过 AI 评审"
+
+      - name: 📤 Upload AI Review Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-results
+          path: |
+            ai-review-*.json
+            ai-review-raw-*.txt
+          if-no-files-found: ignore
