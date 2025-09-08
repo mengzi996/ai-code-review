@@ -21,6 +21,7 @@ public class SimpleTest {
     
     // 方法抛出通用Exception
     public void testMethod() throws Exception {
+        System.out.println("空方法体");
         // 空方法体
     }
 }
