@@ -23,5 +23,6 @@ public class SimpleTest {
     public void testMethod() throws Exception {
         System.out.println("空方法体");
         // 空方法体
+        System.out.println("空方法体2");
     }
 }
