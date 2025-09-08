@@ -1,0 +1,78 @@
+name: 🤖 AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.java'
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-22.04
+    container: ollama/ollama:latest
+
+    steps:
+      - name: 📦 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: ⬇️ Pull AI Model
+        run: ollama pull deepseek-coder:33b
+
+      - name: 🔍 Find Java Files
+        id: java_files
+        run: |
+          echo "JAVA_FILES=$(find . -name '*.java' -type f | xargs realpath --relative-base=.)" >> $GITHUB_OUTPUT
+
+      - name: 🧠 Run AI Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 安装 jq（用于安全处理 JSON）
+          if ! command -v jq &> /dev/null; then
+            apt-get update && apt-get install -y jq
+          fi
+
+          # 遍历每个 Java 文件
+          for file in ${{ steps.java_files.outputs.JAVA_FILES }}; do
+            echo "🔍 正在评审: $file"
+            
+            # 调用 AI 分析代码（EOF_PROMPT 必须顶格！）
+            OUTPUT=$(ollama run deepseek-coder:33b << 'EOF_PROMPT')
+请严格分析以下Java代码，重点关注：
+1. 线程安全（如 SimpleDateFormat 使用）
+2. 异常处理（避免 throws Exception）
+3. 日志记录（是否使用 SLF4J）
+4. 空值检查
+5. 性能问题
+
+请以标准JSON格式返回，不要有任何额外说明：
+{
+  "file": "placeholder",
+  "issues": [
+    {
+      "line": 1,
+      "severity": "error",
+      "message": "问题描述",
+      "suggestion": "改进建议"
+    }
+  ],
+  "score": 85
+}
+
+代码如下：
+$(cat "$file")
+EOF_PROMPT
+            )
+
+            # 使用 jq 安全替换文件名
+            echo "$OUTPUT" | jq --arg filepath "$file" '.file = $filepath' > ai-review-result.json
+
+            # 检查是否有 error 级问题
+            if jq -e '.issues[] | select(.severity == "error")' ai-review-result.json > /dev/null; then
+              echo "❌ AI 发现严重问题，阻断构建"
+              cat ai-review-result.json
+              exit 1
+            fi
+            
+            echo "✅ $file 通过 AI 评审"
+          done
